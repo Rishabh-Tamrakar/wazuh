@@ -742,18 +742,17 @@ add_whodata_evt:
                 if (w_evt = OSHash_Delete_ex(syscheck.wdata.fd, hash_id), w_evt && w_evt->path) {
                     unsigned int mask = w_evt->mask;
                     if (!w_evt->scan_directory) {
+
                         if (w_evt->deleted) {
                             // Check if the file has been deleted
                             w_evt->ignore_remove_event = 0;
                         } else if (mask & DELETE) {
                             // The file has been moved or renamed
                             w_evt->ignore_remove_event = 0;
-                        } else if (mask & modify_criteria) {
-                            // Check if the file has been modified
-                        } else {
-                            // At this point the file can be created
                         }
+
                         fim_whodata_event(w_evt, item);
+
                     } else if (w_evt->scan_directory == 1) { // Directory scan has been aborted if scan_directory is 2
                         if (mask & DELETE) {
 
@@ -772,9 +771,11 @@ add_whodata_evt:
                         } else {
                             mdebug2(FIM_WHODATA_NO_NEW_FILES, w_evt->path, w_evt->mask);
                         }
+
                     } else if (w_evt->scan_directory == 2) {
                         mdebug1(FIM_WHODATA_SCAN_ABORTED, w_evt->path);
                     }
+
                     free_win_whodata_evt(w_evt);
                 } // In else section: The file was opened before Wazuh started Syscheck.
                 os_free(item);
@@ -1462,141 +1463,6 @@ int whodata_check_arch() {
             }
         }
         RegCloseKey(RegistryKey);
-    }
-
-    return retval;
-}
-
-int w_update_sacl(const char *obj_path) {
-    SYSTEM_AUDIT_ACE *ace = NULL;
-    SID_IDENTIFIER_AUTHORITY world_auth = {SECURITY_WORLD_SID_AUTHORITY};
-    HANDLE hdle = NULL;
-    PSECURITY_DESCRIPTOR security_descriptor = NULL;
-    PACL old_sacl = NULL;
-    PACL new_sacl = NULL;
-    long unsigned result;
-    unsigned long new_sacl_size;
-    int retval = OS_INVALID;
-    int privilege_enabled = 0;
-    ACL_SIZE_INFORMATION old_sacl_info;
-    PVOID entry_access_it = NULL;
-    unsigned int i;
-
-    if (!everyone_sid) {
-        if (!AllocateAndInitializeSid(&world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &everyone_sid)) {
-            merror(FIM_ERROR_WHODATA_WIN_SIDERROR, GetLastError());
-            goto end;
-        }
-    }
-
-    if (!ev_sid_size) {
-        ev_sid_size = GetLengthSid(everyone_sid);
-    }
-
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hdle)) {
-        merror(FIM_ERROR_WHODATA_OPEN_TOKEN, GetLastError());
-        goto end;
-    }
-
-    if (set_privilege(hdle, priv, TRUE)) {
-        merror(FIM_ERROR_WHODATA_ACTIVATE_PRIV, GetLastError());
-        goto end;
-    }
-
-    privilege_enabled = 1;
-
-    if (result = GetNamedSecurityInfo(obj_path, SE_FILE_OBJECT, SACL_SECURITY_INFORMATION, NULL, NULL, NULL, &old_sacl, &security_descriptor), result != ERROR_SUCCESS) {
-        merror(FIM_ERROR_WHODATA_GETNAMEDSECURITY, result);
-        goto end;
-    }
-
-    ZeroMemory(&old_sacl_info, sizeof(ACL_SIZE_INFORMATION));
-    // Get SACL size
-    if (old_sacl && !GetAclInformation(old_sacl, (LPVOID)&old_sacl_info, sizeof(ACL_SIZE_INFORMATION), AclSizeInformation)) {
-        merror(FIM_ERROR_WHODATA_SACL_SIZE, obj_path);
-        goto end;
-    }
-
-    // Set the new ACL size
-    new_sacl_size = (old_sacl ? old_sacl_info.AclBytesInUse : sizeof(ACL)) + sizeof(SYSTEM_AUDIT_ACE) + ev_sid_size;
-
-    if (new_sacl = (PACL)win_alloc(new_sacl_size), !new_sacl) {
-        merror(FIM_ERROR_WHODATA_SACL_MEMORY, obj_path);
-        goto end;
-    }
-
-    if (!InitializeAcl(new_sacl, new_sacl_size, ACL_REVISION)) {
-        merror(FIM_ERROR_WHODATA_SACL_NOCREATE, obj_path, GetLastError());
-        goto end;
-    }
-
-    if (ace = (SYSTEM_AUDIT_ACE *)win_alloc(sizeof(SYSTEM_AUDIT_ACE) + ev_sid_size - sizeof(DWORD)), !ace) {
-        merror(FIM_ERROR_WHODATA_ACE_MEMORY, obj_path, GetLastError());
-        goto end;
-    }
-
-    ace->Header.AceType  = SYSTEM_AUDIT_ACE_TYPE;
-    ace->Header.AceFlags = FAILED_ACCESS_ACE_FLAG;
-    ace->Header.AceSize  = LOWORD(sizeof(SYSTEM_AUDIT_ACE) + ev_sid_size - sizeof(DWORD));
-    ace->Mask            = 0;
-
-    if (!CopySid(ev_sid_size, &ace->SidStart, everyone_sid)) {
-        merror(FIM_ERROR_WHODATA_COPY_SID, obj_path, ev_sid_size, GetLastError());
-        goto end;
-    }
-
-    if (old_sacl) {
-        if (old_sacl_info.AceCount) {
-            for (i = 0; i < old_sacl_info.AceCount; i++) {
-               if (!GetAce(old_sacl, i, &entry_access_it)) {
-                   merror(FIM_ERROR_WHODATA_ACE_NOOBTAIN, i, obj_path);
-                   goto end;
-               }
-
-               if (!AddAce(new_sacl, ACL_REVISION, MAXDWORD, entry_access_it, ((PACE_HEADER)entry_access_it)->AceSize)) {
-                   merror(FIM_ERROR_WHODATA_ACE_NUMBER, i, obj_path);
-                   goto end;
-               }
-           }
-        }
-    }
-
-    // Add the new ACE
-    if (!AddAce(new_sacl, ACL_REVISION, 0, (LPVOID)ace, ace->Header.AceSize)) {
-        merror(FIM_ERROR_WHODATA_ACE_NOADDED, obj_path, GetLastError());
-        goto end;
-    }
-
-    if (result = SetNamedSecurityInfo((char *) obj_path, SE_FILE_OBJECT, SACL_SECURITY_INFORMATION, NULL, NULL, NULL, new_sacl), result != ERROR_SUCCESS) {
-        merror(FIM_ERROR_WHODATA_SETNAMEDSECURITY, result);
-        goto end;
-    }
-
-    retval = 0;
-end:
-    if (privilege_enabled && set_privilege(hdle, priv, FALSE)) {
-        merror(FIM_ERROR_WHODATA_ACTIVATE_PRIV, GetLastError());
-        goto end;
-    }
-
-    if (security_descriptor) {
-        LocalFree((HLOCAL)security_descriptor);
-    }
-
-    if (old_sacl) {
-        LocalFree((HLOCAL)old_sacl);
-    }
-
-    if (new_sacl) {
-        LocalFree((HLOCAL)new_sacl);
-    }
-
-    if (hdle) {
-        CloseHandle(hdle);
-    }
-
-    if (ace) {
-        LocalFree((HLOCAL)ace);
     }
 
     return retval;

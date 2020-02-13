@@ -659,16 +659,6 @@ size_t syscom_dispatch(char *command, char **output);
  */
 size_t syscom_getconfig(const char *section, char **output);
 
-#ifdef WIN_WHODATA
-/**
- * @brief Updates the SACL of an specific file
- *
- * @param obj_path The path of the file to update the SACL of
- * @return 0 on success, -1 on error
- */
-int w_update_sacl(const char *obj_path);
-#endif
-
 #ifdef WIN32
 #define check_removed_file(x) ({ strstr(x, ":\\$recycle.bin") ? 1 : 0; })
 #endif
